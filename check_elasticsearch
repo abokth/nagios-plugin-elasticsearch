@@ -149,6 +149,10 @@ class ElasticSearchCheck(NagiosCheck):
         es_clusterstats = get_json(r'http://%s:%d/%s_cluster/stats' %
                                    (host, port, prefix))
 
+        # Request local node info.  This contains the node config.
+        es_localnode = get_json(r'http://%s:%d/%s_nodes/_local' %
+                                (host, port, prefix))
+
         # Request a bunch of useful numbers that we export as perfdata.  
         # Details like the number of get, search, and indexing 
         # operations come from here.
@@ -167,6 +171,17 @@ class ElasticSearchCheck(NagiosCheck):
         n_unassigned_shards = es_health['unassigned_shards']
         n_shards = (n_active_shards + n_relocating_shards +
                     n_initialising_shards + n_unassigned_shards)
+
+        n_min_mnodes = None
+
+        try:
+            nodesettings = es_localnode['nodes'][myid]['settings']
+            n_min_mnodes_str = int(nodesettings['discovery']['zen']['minimum_master_nodes'])
+            n_min_mnodes = int(n_min_mnodes_str)
+        except KeyError:
+            pass
+        except ValueError:
+            pass
 
         #
         # Map construction
@@ -468,12 +483,26 @@ class ElasticSearchCheck(NagiosCheck):
         if opts.master_nodes is not None:
             if n_mnodes < int(opts.master_nodes):
                 downgraded |= self.downgrade_health(YELLOW)
-                detail.append("Expected to find %d master-eligible "
+                detail.append("Expected to find at least %d master-eligible "
                               "nodes in the cluster but only found %d" %
                               (int(opts.master_nodes), n_mnodes))
 
         if downgraded:
             msg = ("Missing master-eligible nodes")
+
+        # Assertion:  You have no more master-eligible nodes in the
+        # cluster than you think you ought to.
+        downgraded = False
+
+        if n_min_mnodes is not None:
+            if n_min_mnodes <= n_mnodes / 2:
+                downgraded |= self.downgrade_health(YELLOW)
+                detail.append("Expected to find at most %d master-eligible "
+                              "nodes in the cluster but found %d" %
+                              (n_min_mnodes*2-1, n_mnodes))
+
+        if downgraded:
+            msg = ("Too many master-eligible nodes")
 
         # Assertion:  Replicas are not stored in the same failure domain 
         # as their primary.
